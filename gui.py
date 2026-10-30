@@ -17,8 +17,26 @@ from PySide6.QtWidgets import (
     QScrollArea, QVBoxLayout, QWidget,
 )
 
-APP_DIR = Path(__file__).resolve().parent
-BACKEND = APP_DIR / "lighting.py"
+# Detect whether the application is running from a PyInstaller build.
+FROZEN = getattr(sys, "frozen", False)
+
+if FROZEN:
+    APP_DIR = Path(sys.executable).resolve().parent.parent
+
+    # Support both the current PyInstaller build and the final AppImage layout.
+    backend_candidates = [
+        APP_DIR / "backend" / "wayland-vts-lighting-backend",
+        APP_DIR / "wayland-vts-lighting-backend" / "wayland-vts-lighting-backend",
+    ]
+
+    BACKEND = next(
+        (path for path in backend_candidates if path.exists()),
+        backend_candidates[0],
+    )
+else:
+    APP_DIR = Path(__file__).resolve().parent
+    BACKEND = APP_DIR / "lighting.py"
+
 CONFIG_DIR = Path.home() / ".config" / "wayland-vts-lighting"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 DEFAULTS = {
@@ -81,7 +99,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(620, 500)
         self.resize(780, 800)
         self.process = QProcess(self)
-        self.process.setProgram(sys.executable)
         self.process.setWorkingDirectory(str(APP_DIR))
         self.process.readyReadStandardOutput.connect(self.read_stdout)
         self.process.readyReadStandardError.connect(self.read_stderr)
@@ -136,7 +153,7 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         capture_layout.addWidget(note)
         buttons = QHBoxLayout()
-        self.start_button = QPushButton("Select window & start")
+        self.start_button = QPushButton("Select window and start")
         self.start_button.setObjectName("primary")
         self.stop_button = QPushButton("Stop lighting")
         self.stop_button.setEnabled(False)
@@ -277,16 +294,24 @@ class MainWindow(QMainWindow):
     def start_lighting(self):
         if self.process.state() != QProcess.ProcessState.NotRunning:
             return
+
         if not BACKEND.exists():
             QMessageBox.critical(self, "Backend missing", f"Could not find {BACKEND}")
             return
+
         self.save_current_settings(quiet=True)
         self.log.clear()
         self.capture_target.setText("Waiting for the KDE window picker…")
         self.status.setText("●  Starting")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.process.start(sys.executable, [str(BACKEND)])
+
+        if FROZEN:
+            # Run the bundled backend executable.
+            self.process.start(str(BACKEND), [])
+        else:
+            # Run the Python backend during development.
+            self.process.start(sys.executable, [str(BACKEND)])
 
     def stop_lighting(self):
         pid = int(self.process.processId())

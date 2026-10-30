@@ -6,3 +6,12 @@ token
 **/token
 settings.json
 *.log
+
+# AppImage and PyInstaller build output
+/build/
+/dist/
+/tools/
+*.spec
+
+# Python virtual environments
+.venv/
