@@ -47,6 +47,7 @@ DEFAULTS = {
     "brightness_smoothing": 0.18,
     "brightness_range": 12,
     "brightness_enabled": True,
+    "brightness_boost": 0,
 }
 
 
@@ -107,6 +108,16 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self._build_ui()
         self._load_controls()
+
+        # Automatically save settings shortly after a control changes.
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.setInterval(300)
+        self.autosave_timer.timeout.connect(
+            lambda: self.save_current_settings(quiet=True)
+        )
+
+        self._connect_autosave()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_process_state)
         self.refresh_timer.start(500)
@@ -199,17 +210,38 @@ class MainWindow(QMainWindow):
         brightness_row.addWidget(QLabel("Strength"))
         brightness_row.addWidget(self.brightness_range)
         light_layout.addLayout(brightness_row)
+
+        self.brightness_boost = SliderSetting(
+            "Brightness boost",
+            0,
+            20,
+            self.settings["brightness_boost"],
+        )
+        light_layout.addWidget(self.brightness_boost)
+
+        boost_note = QLabel(
+            "Adds extra brightness on top of game matching. "
+            "Requires Match game brightness to be enabled."
+        )
+        boost_note.setObjectName("muted")
+        boost_note.setWordWrap(True)
+        light_layout.addWidget(boost_note)
+
         outer.addWidget(lighting)
 
         footer = QHBoxLayout()
         self.save_button = QPushButton("Save settings")
-        self.save_button.clicked.connect(self.save_current_settings)
+        self.save_button.clicked.connect(
+            lambda: self.save_current_settings()
+        )
         footer.addWidget(self.save_button)
         self.reset_button = QPushButton("Reset to defaults")
         self.reset_button.clicked.connect(self.reset_to_defaults)
         footer.addWidget(self.reset_button)
         footer.addStretch()
-        self.apply_note = QLabel("Settings are applied the next time lighting starts.")
+        self.apply_note = QLabel(
+            "Most settings apply live. Capture rate requires restarting lighting."
+        )
         self.apply_note.setObjectName("muted")
         footer.addWidget(self.apply_note)
         outer.addLayout(footer)
@@ -252,6 +284,28 @@ class MainWindow(QMainWindow):
         self.brightness_smooth.slider.setValue(round(self.settings["brightness_smoothing"] * 100))
         self.brightness_enabled.setChecked(bool(self.settings["brightness_enabled"]))
         self.brightness_range.setValue(int(self.settings["brightness_range"]))
+        self.brightness_boost.slider.setValue(
+        int(self.settings["brightness_boost"])
+        )
+
+    def _connect_autosave(self):
+        # Performance dropdowns
+        self.capture_fps.currentTextChanged.connect(self.schedule_autosave)
+        self.update_fps.currentTextChanged.connect(self.schedule_autosave)
+
+        # Lighting sliders
+        self.intensity.slider.valueChanged.connect(self.schedule_autosave)
+        self.color_smooth.slider.valueChanged.connect(self.schedule_autosave)
+        self.brightness_smooth.slider.valueChanged.connect(self.schedule_autosave)
+        self.brightness_boost.slider.valueChanged.connect(self.schedule_autosave)
+
+        # Brightness controls
+        self.brightness_enabled.toggled.connect(self.schedule_autosave)
+        self.brightness_range.valueChanged.connect(self.schedule_autosave)
+
+
+    def schedule_autosave(self, *_args):
+        self.autosave_timer.start()
 
     def collect_settings(self):
         return {
@@ -262,6 +316,7 @@ class MainWindow(QMainWindow):
             "brightness_smoothing": self.brightness_smooth.value(),
             "brightness_range": self.brightness_range.value(),
             "brightness_enabled": self.brightness_enabled.isChecked(),
+            "brightness_boost": int(self.brightness_boost.value()),
         }
 
     def save_current_settings(self, quiet=False):
@@ -284,6 +339,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
+        self.autosave_timer.stop()
         self.settings = DEFAULTS.copy()
         self._load_controls()
         self.save_current_settings(quiet=True)

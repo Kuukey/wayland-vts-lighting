@@ -45,13 +45,15 @@ BRIGHTNESS_INTERVAL = 0.35
 BRIGHTNESS_RANGE = 12
 BRIGHTNESS_CENTER = 128
 BRIGHTNESS_UPDATE_THRESHOLD = 2
+BRIGHTNESS_BOOST = 0
 
 # VTube Studio Color Grading.
 COLOR_GRADING_STRENGTH = 1.0
 POST_PROCESSING_FADE_TIME = 0.3
 
-# User-editable settings are read by the desktop frontend and this backend.
+
 SETTINGS_FILE = Path.home() / ".config" / "wayland-vts-lighting" / "settings.json"
+
 try:
     _settings = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
 except (OSError, json.JSONDecodeError):
@@ -61,11 +63,91 @@ CAPTURE_FPS = int(np.clip(_settings.get("capture_fps", CAPTURE_FPS), 1, 120))
 COLOR_UPDATE_FPS = int(np.clip(_settings.get("color_update_fps", COLOR_UPDATE_FPS), 1, 120))
 CAPTURE_INTERVAL = 1.0 / CAPTURE_FPS
 COLOR_UPDATE_INTERVAL = 1.0 / COLOR_UPDATE_FPS
+
 COLOR_SMOOTHING = float(np.clip(_settings.get("color_smoothing", COLOR_SMOOTHING), 0.01, 1.0))
 BRIGHTNESS_SMOOTHING = float(np.clip(_settings.get("brightness_smoothing", BRIGHTNESS_SMOOTHING), 0.01, 1.0))
 LIGHTING_INTENSITY = float(np.clip(_settings.get("lighting_intensity", LIGHTING_INTENSITY), 0.0, 1.0))
 BRIGHTNESS_RANGE = int(np.clip(_settings.get("brightness_range", BRIGHTNESS_RANGE), 0, 50))
 BRIGHTNESS_ENABLED = bool(_settings.get("brightness_enabled", True))
+BRIGHTNESS_BOOST = int(np.clip(_settings.get("brightness_boost", BRIGHTNESS_BOOST), 0, 20))
+
+try:
+    SETTINGS_MTIME_NS = SETTINGS_FILE.stat().st_mtime_ns
+except OSError:
+    SETTINGS_MTIME_NS = None
+
+
+def reload_settings_if_changed():
+    """Reload settings when the GUI saves a new settings.json."""
+
+    global SETTINGS_MTIME_NS
+    global COLOR_UPDATE_FPS, COLOR_UPDATE_INTERVAL
+    global COLOR_SMOOTHING, BRIGHTNESS_SMOOTHING
+    global LIGHTING_INTENSITY, BRIGHTNESS_RANGE
+    global BRIGHTNESS_ENABLED, BRIGHTNESS_BOOST
+
+    try:
+        mtime = SETTINGS_FILE.stat().st_mtime_ns
+    except OSError:
+        return None
+
+    if mtime == SETTINGS_MTIME_NS:
+        return None
+
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        # The GUI may still be writing the file. Retry next iteration.
+        return None
+
+    old_enabled = BRIGHTNESS_ENABLED
+    old_brightness_values = (
+        BRIGHTNESS_RANGE,
+        BRIGHTNESS_BOOST,
+    )
+    old_color_update_fps = COLOR_UPDATE_FPS
+
+    # Capture FPS cannot change on an already-running PipeWire stream.
+    requested_capture_fps = int(
+        np.clip(settings.get("capture_fps", CAPTURE_FPS), 1, 120)
+    )
+
+    COLOR_UPDATE_FPS = int(
+        np.clip(settings.get("color_update_fps", COLOR_UPDATE_FPS), 1, 120)
+    )
+    COLOR_UPDATE_INTERVAL = 1.0 / COLOR_UPDATE_FPS
+
+    COLOR_SMOOTHING = float(
+        np.clip(settings.get("color_smoothing", COLOR_SMOOTHING), 0.01, 1.0)
+    )
+    BRIGHTNESS_SMOOTHING = float(
+        np.clip(settings.get("brightness_smoothing", BRIGHTNESS_SMOOTHING), 0.01, 1.0)
+    )
+    LIGHTING_INTENSITY = float(
+        np.clip(settings.get("lighting_intensity", LIGHTING_INTENSITY), 0.0, 1.0)
+    )
+    BRIGHTNESS_RANGE = int(
+        np.clip(settings.get("brightness_range", BRIGHTNESS_RANGE), 0, 50)
+    )
+    BRIGHTNESS_ENABLED = bool(
+        settings.get("brightness_enabled", BRIGHTNESS_ENABLED)
+    )
+    BRIGHTNESS_BOOST = int(
+        np.clip(settings.get("brightness_boost", BRIGHTNESS_BOOST), 0, 20)
+    )
+
+    SETTINGS_MTIME_NS = mtime
+
+    return {
+        "brightness_enabled_changed": old_enabled != BRIGHTNESS_ENABLED,
+        "brightness_values_changed": old_brightness_values != (
+            BRIGHTNESS_RANGE,
+            BRIGHTNESS_BOOST,
+        ),
+        "color_update_fps_changed": old_color_update_fps != COLOR_UPDATE_FPS,
+        "capture_fps_restart_required": requested_capture_fps != CAPTURE_FPS,
+    }
+
 
 
 # -----------------------------
@@ -247,20 +329,22 @@ def calculate_tint(rgb):
 
 
 def calculate_brightness(luminance):
-    """Map game luminance to the configured VTS brightness range."""
+    """Map game luminance to VTS brightness, with an optional brightness boost."""
 
     brightness = (
         (luminance - BRIGHTNESS_CENTER)
         / BRIGHTNESS_CENTER
     ) * BRIGHTNESS_RANGE
 
-    return int(
+    matched_brightness = int(
         np.clip(
             round(brightness),
             -BRIGHTNESS_RANGE,
             BRIGHTNESS_RANGE,
         )
     )
+
+    return matched_brightness + BRIGHTNESS_BOOST
 
 
 # -----------------------------
@@ -429,6 +513,60 @@ def main():
                     continue
 
                 now = time.monotonic()
+
+                # Check whether the GUI has saved new settings.
+                changes = reload_settings_if_changed()
+
+                if changes is not None:
+                    if changes["capture_fps_restart_required"]:
+                        print(
+                            "\nCapture FPS changed. Restart lighting "
+                            "to apply the new capture rate."
+                        )
+
+                    if changes["color_update_fps_changed"]:
+                        next_color_update = 0.0
+                        print(
+                            f"\nVTube Studio update rate changed to "
+                            f"{COLOR_UPDATE_FPS} FPS."
+                        )
+
+                    # Enable or disable VTS brightness processing immediately.
+                    if changes["brightness_enabled_changed"]:
+                        if BRIGHTNESS_ENABLED:
+                            current_brightness = calculate_brightness(luminance)
+
+                            set_model_brightness(
+                                ws,
+                                brightness=current_brightness,
+                                enabled=True,
+                            )
+
+                            post_processing_enabled = True
+                            last_brightness_sent = current_brightness
+
+                            print("\nBrightness matching enabled.")
+                        else:
+                            set_model_brightness(
+                                ws,
+                                brightness=0,
+                                enabled=False,
+                            )
+
+                            post_processing_enabled = False
+                            last_brightness_sent = None
+
+                            print("\nBrightness matching disabled.")
+
+                        last_brightness_update = time.monotonic()
+
+                    # Force a brightness update when range or boost changes.
+                    elif (
+                        BRIGHTNESS_ENABLED
+                        and changes["brightness_values_changed"]
+                    ):
+                        last_brightness_sent = None
+                        last_brightness_update = 0.0
 
                 # Detect a capture thread that has stopped updating.
                 if now - sample_timestamp > 2.0:
